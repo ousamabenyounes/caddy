@@ -506,6 +506,61 @@ func TestServer_serveHTTP_DropsUnderscoreHeader(t *testing.T) {
 	assert.Equal(t, "ok", got.Get("X-Real-Header"))
 }
 
+func TestServer_serveHTTP_RejectsMalformedHost(t *testing.T) {
+	const (
+		validHostname      = "example.com:443"
+		validIPv6          = "[2001:db8::1]:443"
+		validIPvFuture     = "[v1.example]"
+		emptyIPLiteral     = "[]"
+		invalidIPv6        = "[123g::1]"
+		unclosedIPLiteral  = "[::1"
+		nonnumericPort     = "example.com:https"
+		outOfRangePort     = "example.com:65536"
+		multiplePortColons = "example.com::443"
+	)
+	tests := []struct {
+		name string
+		host string
+		want int
+	}{
+		{name: "hostname", host: validHostname, want: http.StatusOK},
+		{name: "IPv6", host: validIPv6, want: http.StatusOK},
+		{name: "IPvFuture", host: validIPvFuture, want: http.StatusOK},
+		{name: "empty IP-literal", host: emptyIPLiteral, want: http.StatusBadRequest},
+		{name: "invalid IPv6", host: invalidIPv6, want: http.StatusBadRequest},
+		{name: "unclosed IP-literal", host: unclosedIPLiteral, want: http.StatusBadRequest},
+		{name: "nonnumeric port", host: nonnumericPort, want: http.StatusBadRequest},
+		{name: "out-of-range port", host: outOfRangePort, want: http.StatusBadRequest},
+		{name: "multiple port colons", host: multiplePortColons, want: http.StatusBadRequest},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handlerCalled := false
+			s := &Server{
+				primaryHandlerChain: HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+					handlerCalled = true
+					return nil
+				}),
+			}
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Host = test.host
+
+			err := s.serveHTTP(httptest.NewRecorder(), req)
+			if test.want == http.StatusOK {
+				require.NoError(t, err)
+				assert.True(t, handlerCalled)
+				return
+			}
+
+			var handlerErr HandlerError
+			require.ErrorAs(t, err, &handlerErr)
+			assert.Equal(t, test.want, handlerErr.StatusCode)
+			assert.False(t, handlerCalled)
+		})
+	}
+}
+
 // TestServer_serveHTTP_LogsDroppedUnderscoreHeader verifies each dropped
 // header is emitted at debug level so operators can diagnose unexpectedly
 // missing headers without spamming the log on adversarial traffic.

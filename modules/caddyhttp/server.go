@@ -506,9 +506,20 @@ func (s *Server) isHyphenatedVariant(key string) bool {
 
 var defaultProtocols = []string{"h1", "h2", "h3"}
 
+const (
+	ipvFutureMinimumLength = 4
+	ipvFutureVersionEndMin = 2
+	percentEncodedLength   = 2
+	maximumPort            = 65535
+	decimalBase            = 10
+	unreservedSymbols      = "-._~"
+	subDelimiterSymbols    = "!$&'()*+,;="
+)
+
 var (
-	ServerHeader = "Caddy"
-	serverHeader = []string{ServerHeader}
+	ServerHeader   = "Caddy"
+	serverHeader   = []string{ServerHeader}
+	errInvalidHost = errors.New("invalid Host header")
 )
 
 // ServeHTTP is the entry point for all HTTP requests.
@@ -697,6 +708,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) error {
 			StatusCode: http.StatusBadRequest,
 		}
 	}
+	if r.Host != "" && !validHostHeader(r.Host) {
+		return HandlerError{
+			Err:        errInvalidHost,
+			StatusCode: http.StatusBadRequest,
+		}
+	}
 
 	// Drop headers whose names contain `_` or `.`: once FastCGI/CGI/FrankenPHP etc.
 	// rewrites `-` to `_` (and PHP additionally folds `.` to `_` when registering
@@ -777,6 +794,89 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) error {
 
 	// execute the primary handler chain
 	return s.primaryHandlerChain.ServeHTTP(w, r)
+}
+
+// validHostHeader reports whether host matches the URI host and optional port
+// syntax used by the Host field, as defined by RFC 3986 section 3.2.2.
+func validHostHeader(host string) bool {
+	if strings.HasPrefix(host, "[") {
+		closingBracket := strings.IndexByte(host, ']')
+		if closingBracket < 0 || !validIPLiteral(host[1:closingBracket]) {
+			return false
+		}
+		remainder := host[closingBracket+1:]
+		return remainder == "" || strings.HasPrefix(remainder, ":") && validPort(remainder[1:])
+	}
+	if strings.ContainsRune(host, ']') {
+		return false
+	}
+
+	hostname, port, hasPort := strings.Cut(host, ":")
+	if hasPort && !validPort(port) {
+		return false
+	}
+	return validRegisteredName(hostname)
+}
+
+func validIPLiteral(literal string) bool {
+	if addr, err := netip.ParseAddr(literal); err == nil {
+		return addr.Is6()
+	}
+	if len(literal) < ipvFutureMinimumLength || literal[0] != 'v' && literal[0] != 'V' {
+		return false
+	}
+
+	versionEnd := strings.IndexByte(literal, '.')
+	if versionEnd < ipvFutureVersionEndMin {
+		return false
+	}
+	for _, char := range literal[1:versionEnd] {
+		if !isHexDigit(char) {
+			return false
+		}
+	}
+	for _, char := range literal[versionEnd+1:] {
+		if !isUnreserved(char) && !strings.ContainsRune(subDelimiterSymbols+":", char) {
+			return false
+		}
+	}
+	return versionEnd < len(literal)-1
+}
+
+func validRegisteredName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		char := rune(name[i])
+		if isUnreserved(char) || strings.ContainsRune(subDelimiterSymbols, char) {
+			continue
+		}
+		if char != '%' || i+percentEncodedLength >= len(name) || !isHexDigit(rune(name[i+1])) || !isHexDigit(rune(name[i+percentEncodedLength])) {
+			return false
+		}
+		i += percentEncodedLength
+	}
+	return name != ""
+}
+
+func validPort(port string) bool {
+	value := 0
+	for _, char := range port {
+		if char < '0' || char > '9' {
+			return false
+		}
+		value = value*decimalBase + int(char-'0')
+		if value > maximumPort {
+			return false
+		}
+	}
+	return true
+}
+
+func isHexDigit(char rune) bool {
+	return char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F'
+}
+
+func isUnreserved(char rune) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || strings.ContainsRune(unreservedSymbols, char)
 }
 
 // wrapPrimaryRoute wraps stack (a compiled middleware handler chain)
